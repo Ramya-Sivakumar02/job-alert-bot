@@ -35,10 +35,15 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 SEEN_FILE = os.path.join(os.path.dirname(__file__), "seen_jobs.json")
 
-# Only alert if the job title matches at least one of these (case-insensitive)
+# Only alert if the job title matches at least one of these (case-insensitive).
+# Widened to catch more real postings — many companies phrase the same role
+# differently (e.g. "Backend Developer" vs "Software Engineer, Backend").
 KEYWORDS = [
-    "java", "software engineer", "backend", "full stack", "fullstack",
-    "senior software developer", "spring boot", "sde",
+    "java", "software engineer", "software developer", "backend",
+    "back-end", "back end", "full stack", "fullstack", "full-stack",
+    "senior software developer", "senior developer", "spring boot",
+    "sde", "platform engineer", "cloud engineer", "distributed systems",
+    "microservices", "api engineer", "systems engineer", "applications engineer",
 ]
 
 # Job titles containing these are SKIPPED even if keywords match — these
@@ -94,6 +99,10 @@ US_KEYWORDS = [
     "remote (us)", "remote, us", "remote, usa", "us remote",
 ]
 
+# Alerts for these locations get a priority flag and are sent first in
+# each batch, per your preference.
+PRIORITY_LOCATION_KEYWORDS = ["remote", "austin"]
+
 # Companies to monitor. "board" is the identifier the ATS uses in its URL —
 # verify by visiting the URL pattern in the comment for each ATS type.
 #
@@ -133,8 +142,12 @@ COMPANIES = [
     # by visiting boards.greenhouse.io/<slug> yourself before fully trusting) ---
     {"name": "Stripe",        "ats": "greenhouse", "board": "stripe"},
     {"name": "PayPal",        "ats": "custom",     "url": "https://careers.pypl.com/search-jobs/java"},
-    {"name": "Fiserv",        "ats": "custom",     "url": "https://cvfiserv.wd1.myworkdayjobs.com/FiservCareers"},
-    {"name": "FIS",           "ats": "custom",     "url": "https://fisglobal.wd1.myworkdayjobs.com/FISGlobalCareers"},
+
+    # --- Workday-hosted companies (CONFIRMED tenants — verified via live
+    # listings, my earlier guesses for these two were actually wrong and
+    # have been corrected here) ---
+    {"name": "Fiserv", "ats": "workday", "tenant": "fiserv", "datacenter": "wd5", "site": "EXT"},
+    {"name": "FIS",    "ats": "workday", "tenant": "fis",    "datacenter": "wd5", "site": "SearchJobs"},
 
     # --- Tier 2: banks ---
     {"name": "JPMorgan Chase","ats": "custom",     "url": "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001"},
@@ -190,6 +203,34 @@ def fetch_lever(board):
             "content": j.get("descriptionPlain", "") or j.get("description", ""),
         }
         for j in jobs
+    ]
+
+
+def fetch_workday(tenant, datacenter, site):
+    """Workday's CXS API (used by most large enterprises: banks, healthcare,
+    fintechs). Unlike a generic 'custom' page-hash, this returns real
+    structured job data — title, location, ID — so it supports the same
+    location/experience filtering as Greenhouse/Lever.
+
+    tenant/datacenter/site come from the company's careers URL, e.g.:
+    https://fiserv.wd5.myworkdayjobs.com/en-US/EXT
+                ^tenant  ^datacenter        ^site
+    """
+    url = f"https://{tenant}.{datacenter}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
+    body = {"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": ""}
+    r = requests.post(url, json=body, timeout=20, headers={"Content-Type": "application/json"})
+    r.raise_for_status()
+    postings = r.json().get("jobPostings", [])
+    base = f"https://{tenant}.{datacenter}.myworkdayjobs.com/{site}"
+    return [
+        {
+            "id": p.get("bulletFields", [p.get("externalPath", "")])[0] or p.get("externalPath", ""),
+            "title": p.get("title", ""),
+            "url": base + p.get("externalPath", ""),
+            "location": p.get("locationsText", ""),
+            "content": "",  # Workday's list endpoint doesn't include full description text
+        }
+        for p in postings
     ]
 
 
@@ -308,6 +349,8 @@ def main():
                 jobs = fetch_greenhouse(company["board"])
             elif company["ats"] == "lever":
                 jobs = fetch_lever(company["board"])
+            elif company["ats"] == "workday":
+                jobs = fetch_workday(company["tenant"], company["datacenter"], company["site"])
             elif company["ats"] == "custom":
                 jobs = fetch_custom(company["url"])
             else:
@@ -334,7 +377,7 @@ def main():
                 if job["id"] in pending:
                     seen_ids.add(job["id"])
                     if not first_run:
-                        new_alerts.append(f"🆕 {name}: {job['title']}\n{job['url']}")
+                        new_alerts.append((False, f"🆕 {name}: {job['title']}\n{job['url']}"))
                 else:
                     new_pending[job["id"]] = True
                 continue
@@ -342,8 +385,12 @@ def main():
             seen_ids.add(job["id"])
             if passes_filters(company, job):
                 if not first_run:
-                    loc = f" [{job['location']}]" if job.get("location") else ""
-                    new_alerts.append(f"🆕 {name}: {job['title']}{loc}\n{job['url']}")
+                    loc = job.get("location", "")
+                    is_priority = any(k in loc.lower() for k in PRIORITY_LOCATION_KEYWORDS)
+                    tag = "⭐ " if is_priority else ""
+                    loc_suffix = f" [{loc}]" if loc else ""
+                    msg = f"{tag}🆕 {name}: {job['title']}{loc_suffix}\n{job['url']}"
+                    new_alerts.append((is_priority, msg))
 
         seen[name] = {"ids": list(seen_ids), "pending": new_pending}
 
@@ -356,7 +403,8 @@ def main():
         return
 
     if new_alerts:
-        for alert in new_alerts:
+        new_alerts.sort(key=lambda pair: not pair[0])  # priority (remote/Austin) first
+        for is_priority, alert in new_alerts:
             send_telegram(alert)
             time.sleep(1)
         print(f"Sent {len(new_alerts)} alert(s).")
