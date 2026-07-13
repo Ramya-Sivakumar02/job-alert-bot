@@ -1,0 +1,37 @@
+name: Job Alert Monitor
+
+on:
+  schedule:
+    # Runs every hour, at minute 0 (UTC). GitHub Actions is free for public
+    # repos, and free-tier private repos get 2,000 min/month — this uses
+    # ~1 min per run, ~720 min/month if hourly, so keep the repo PUBLIC
+    # or reduce frequency (e.g. "0 */2 * * *" for every 2 hours) if private.
+    - cron: '0 * * * *'
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
+
+jobs:
+  check-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitor.py
+
+      - name: Commit updated seen_jobs.json
+        run: |
+          git config user.name "job-alert-bot"
+          git config user.email "actions@github.com"
+          git add seen_jobs.json
+          git diff --staged --quiet || git commit -m "Update seen jobs [skip ci]"
+          git push
