@@ -60,6 +60,14 @@ COMPANIES = [
     {"name": "Databricks",    "ats": "greenhouse", "board": "databricks"},
     {"name": "Robinhood",     "ats": "greenhouse", "board": "robinhood"},
     {"name": "Coinbase",      "ats": "greenhouse", "board": "coinbase"},
+    {"name": "DoorDash",      "ats": "greenhouse", "board": "doordashusa"},
+    {"name": "Twilio",        "ats": "greenhouse", "board": "twilio"},
+    {"name": "Instacart",     "ats": "greenhouse", "board": "instacart"},
+
+    # --- Confirmed NOT on Greenhouse — using their real career-search pages instead ---
+    {"name": "Plaid",         "ats": "custom",     "url": "https://plaid.com/careers/openings/"},
+    {"name": "Datadog",       "ats": "custom",     "url": "https://careers.datadoghq.com/all-jobs/"},
+    {"name": "Snowflake",     "ats": "custom",     "url": "https://careers.snowflake.com/us/en/search-results?keywords=java"},
 
     # --- Tier 1: fintech/payments (board slugs below are best-effort — verify
     # by visiting boards.greenhouse.io/<slug> yourself before fully trusting) ---
