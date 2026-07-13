@@ -41,6 +41,59 @@ KEYWORDS = [
     "senior software developer", "spring boot", "sde",
 ]
 
+# Job titles containing these are SKIPPED even if keywords match — these
+# signal a seniority level outside 8-12 years (too junior or too senior).
+TITLE_EXCLUDE = [
+    # too junior (0-4 yrs)
+    "intern", "internship", "new grad", "new graduate", "entry level",
+    "entry-level", "university grad", "associate software engineer",
+    "software engineer i,", "software engineer i -", "swe i ",
+    "early career", "apprentice", "graduate program", "co-op",
+    # too senior (12+ yrs / management track)
+    "staff engineer", "staff software", "principal", "distinguished",
+    "director", "vp ", "vice president", "head of", "chief ", "fellow",
+    "engineering manager", "manager,", "manager -",
+]
+
+# Regex patterns to pull an explicit years-of-experience requirement out of
+# the job description body (Greenhouse gives us this via content=true).
+# If the posting states a minimum ABOVE this or a maximum BELOW this,
+# it's skipped. If no explicit number is found, the title-based filter
+# above is the only gate (keeps recall reasonable since many postings
+# don't state a number at all).
+MIN_ACCEPTABLE_YEARS = 8
+MAX_ACCEPTABLE_YEARS = 12
+
+YEARS_PATTERN = re.compile(
+    r"(\d{1,2})\+?\s*(?:-|to|–)?\s*(\d{0,2})?\+?\s*years?\s*(?:of\s+)?(?:professional\s+)?experience",
+    re.IGNORECASE,
+)
+
+# US states + DC, for matching Greenhouse's "City, ST" location format.
+US_STATES = {
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN",
+    "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV",
+    "NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN",
+    "TX","UT","VT","VA","WA","WV","WI","WY","DC",
+}
+# Canadian provinces — Greenhouse formats these the same way ("City, ON"),
+# so without this explicit check they'd false-positive as US matches.
+NON_US_PROVINCE_CODES = {"ON","QC","BC","AB","MB","SK","NS","NB","NL","PE","YT","NT","NU"}
+
+NON_US_KEYWORDS = [
+    "india", "canada", "uk", "united kingdom", "ireland", "germany",
+    "poland", "philippines", "singapore", "australia", "mexico", "brazil",
+    "argentina", "japan", "china", "vietnam", "ukraine", "romania", "spain",
+    "france", "netherlands", "bangalore", "hyderabad", "pune", "chennai",
+    "mumbai", "delhi", "toronto", "vancouver", "montreal", "london",
+    "dublin", "berlin", "remote - emea", "remote - apac", "remote - canada",
+    "remote, canada", "emea", "apac",
+]
+US_KEYWORDS = [
+    "united states", "usa", "u.s.", "remote - us", "remote - usa",
+    "remote (us)", "remote, us", "remote, usa", "us remote",
+]
+
 # Companies to monitor. "board" is the identifier the ATS uses in its URL —
 # verify by visiting the URL pattern in the comment for each ATS type.
 #
@@ -51,8 +104,15 @@ KEYWORDS = [
 # NOT ALL companies on your shortlist are confirmed below — ATS providers change,
 # and some (e.g. Amazon, Microsoft, big banks) run heavily customized in-house
 # career sites that don't expose a clean public API. For those, use the
-# "custom" type, which just watches the page for byte-level changes and
-# alerts you to go check it manually (works for literally any URL).
+# "custom" type, which watches the page for changes.
+#
+# IMPORTANT LIMITATION on "custom" sources: they can't be filtered by
+# location or experience level (we only see "the page changed", not
+# individual job details), and they're inherently noisier for dedup since
+# unrelated page changes (ads, counters) can look like "new" content.
+# Prefer "greenhouse"/"lever" entries wherever possible — those give exact
+# job data and reliable per-job dedup. Treat "custom" alerts as "go check
+# manually", not a guaranteed real posting.
 
 COMPANIES = [
     # --- CONFIRMED via live job listings (verified, not guessed) ---
@@ -104,7 +164,16 @@ def fetch_greenhouse(board):
     r = requests.get(url, timeout=20)
     r.raise_for_status()
     jobs = r.json().get("jobs", [])
-    return [{"id": str(j["id"]), "title": j["title"], "url": j["absolute_url"]} for j in jobs]
+    return [
+        {
+            "id": str(j["id"]),
+            "title": j["title"],
+            "url": j["absolute_url"],
+            "location": (j.get("location") or {}).get("name", ""),
+            "content": j.get("content", ""),
+        }
+        for j in jobs
+    ]
 
 
 def fetch_lever(board):
@@ -112,22 +181,91 @@ def fetch_lever(board):
     r = requests.get(url, timeout=20)
     r.raise_for_status()
     jobs = r.json()
-    return [{"id": j["id"], "title": j["text"], "url": j["hostedUrl"]} for j in jobs]
+    return [
+        {
+            "id": j["id"],
+            "title": j["text"],
+            "url": j["hostedUrl"],
+            "location": (j.get("categories") or {}).get("location", ""),
+            "content": j.get("descriptionPlain", "") or j.get("description", ""),
+        }
+        for j in jobs
+    ]
 
 
 def fetch_custom(url):
-    """Fallback: hash the page content. Any change -> alert to go check manually."""
+    """Fallback: hash the page content. Any change -> flagged for manual check.
+    Cannot be filtered by location/experience — no per-job data available."""
     r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     text = re.sub(r"\s+", " ", r.text)
     import hashlib
     digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
-    return [{"id": digest, "title": f"Page changed — check manually: {url}", "url": url}]
+    return [{"id": digest, "title": f"Page changed — check manually: {url}", "url": url,
+             "location": "", "content": ""}]
 
 
 def matches_keywords(title):
     t = title.lower()
+    if any(bad in t for bad in TITLE_EXCLUDE):
+        return False
     return any(k in t for k in KEYWORDS)
+
+
+def is_us_location(location):
+    """USA only. Unknown/blank locations are excluded to stay strict."""
+    if not location:
+        return False
+    loc_lower = location.lower()
+
+    # Explicit "City, XX" pattern (Greenhouse/Lever's common format)
+    m = re.search(r",\s*([A-Za-z]{2})\b", location)
+    if m:
+        code = m.group(1).upper()
+        if code in NON_US_PROVINCE_CODES:
+            return False
+        if code in US_STATES:
+            return True
+
+    if any(k in loc_lower for k in NON_US_KEYWORDS):
+        return False
+    if any(k in loc_lower for k in US_KEYWORDS):
+        return True
+
+    return False  # unknown format -> exclude rather than risk a non-US match
+
+
+def matches_experience(content):
+    """Check for an explicit years-of-experience requirement in the job
+    description. If found, it must overlap the 8-12 year band. If no
+    explicit number is found, this check passes (title filter is the gate)."""
+    if not content:
+        return True
+    text = re.sub("<[^<]+?>", " ", content)  # strip HTML tags
+    matches = YEARS_PATTERN.findall(text)
+    if not matches:
+        return True
+
+    for low, high in matches:
+        low = int(low)
+        high = int(high) if high else low
+        # Reject only if the stated range clearly falls outside 8-12
+        # (e.g. "3-5 years" or "15+ years"); allow anything that overlaps.
+        if high < MIN_ACCEPTABLE_YEARS or low > MAX_ACCEPTABLE_YEARS:
+            return False
+    return True
+
+
+def passes_filters(company, job):
+    if company["ats"] == "custom":
+        return True  # no structured data available to filter on
+    if not matches_keywords(job["title"]):
+        return False
+    if not is_us_location(job["location"]):
+        return False
+    if not matches_experience(job["content"]):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -178,20 +316,42 @@ def main():
             print(f"[ERROR] {name}: {e}")
             continue
 
-        seen_ids = set(seen.get(name, []))
+        record = seen.get(name, {"ids": [], "pending": {}})
+        if isinstance(record, list):  # backward-compat with pre-update seen_jobs.json
+            record = {"ids": record, "pending": {}}
+        seen_ids = set(record.get("ids", []))
+        pending = record.get("pending", {})
+        new_pending = {}
+
         for job in jobs:
             if job["id"] in seen_ids:
                 continue
+
+            if company["ats"] == "custom":
+                # Debounce: a hash must show up on two consecutive runs
+                # before we trust it as a real change (filters out one-off
+                # dynamic page noise like ad slots, counters, timestamps).
+                if job["id"] in pending:
+                    seen_ids.add(job["id"])
+                    if not first_run:
+                        new_alerts.append(f"🆕 {name}: {job['title']}\n{job['url']}")
+                else:
+                    new_pending[job["id"]] = True
+                continue
+
             seen_ids.add(job["id"])
-            if company["ats"] == "custom" or matches_keywords(job["title"]):
+            if passes_filters(company, job):
                 if not first_run:
-                    new_alerts.append(f"🆕 {name}: {job['title']}\n{job['url']}")
-        seen[name] = list(seen_ids)
+                    loc = f" [{job['location']}]" if job.get("location") else ""
+                    new_alerts.append(f"🆕 {name}: {job['title']}{loc}\n{job['url']}")
+
+        seen[name] = {"ids": list(seen_ids), "pending": new_pending}
 
     save_seen(seen)
 
     if first_run:
-        print(f"Seeded {sum(len(v) for v in seen.values())} existing jobs. "
+        total = sum(len(v.get("ids", [])) for v in seen.values())
+        print(f"Seeded {total} existing jobs. "
               f"No alerts sent this run — future runs will alert on NEW postings only.")
         return
 
