@@ -55,7 +55,14 @@ KEYWORDS = [
 # alerts you to go check it manually (works for literally any URL).
 
 COMPANIES = [
-    # --- Tier 1: fintech/payments (confirm board slugs before relying on these) ---
+    # --- CONFIRMED via live job listings (verified, not guessed) ---
+    {"name": "MongoDB",       "ats": "greenhouse", "board": "mongodb"},
+    {"name": "Databricks",    "ats": "greenhouse", "board": "databricks"},
+    {"name": "Robinhood",     "ats": "greenhouse", "board": "robinhood"},
+    {"name": "Coinbase",      "ats": "greenhouse", "board": "coinbase"},
+
+    # --- Tier 1: fintech/payments (board slugs below are best-effort — verify
+    # by visiting boards.greenhouse.io/<slug> yourself before fully trusting) ---
     {"name": "Stripe",        "ats": "greenhouse", "board": "stripe"},
     {"name": "PayPal",        "ats": "custom",     "url": "https://careers.pypl.com/search-jobs/java"},
     {"name": "Fiserv",        "ats": "custom",     "url": "https://cvfiserv.wd1.myworkdayjobs.com/FiservCareers"},
@@ -70,8 +77,10 @@ COMPANIES = [
     {"name": "UnitedHealth/Optum", "ats": "custom", "url": "https://careers.unitedhealthgroup.com/search-jobs/java"},
     {"name": "Cigna",          "ats": "custom",    "url": "https://jobs.cigna.com/us/en/search-results?keywords=java"},
 
-    # --- Tier 4: big tech (high volume, backup targets) ---
-    {"name": "Workday",        "ats": "greenhouse", "board": "workday"},
+    # NOTE: intentionally excludes IT staffing / consultancy firms (TCS,
+    # Infosys, Wipro, Cognizant, Mastech, Compunnel, Kforce, L&T Infotech,
+    # etc.) per your request — these only flood the feed with generic
+    # placement postings, not direct-employer engineering roles.
 
     # Add more companies here in the same shape. For any company, the safest
     # zero-setup option is "custom" + the careers search URL filtered to
